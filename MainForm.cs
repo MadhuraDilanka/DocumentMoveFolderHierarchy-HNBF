@@ -287,19 +287,49 @@ namespace DocumentMoveApp
 
                 foreach (DataRow row in dt.Rows)
                 {
+                    SqlConnection updateConn = null;
                     try
                     {
+                        long documentId = Convert.ToInt64(row["id"]);
                         string sourcePath = row["Location"].ToString() ?? "";
                         string sourceLocation = row["SourceLocation"].ToString() ?? "";
-                        DateTime uploadDate = Convert.ToDateTime(row["UploadDate"]);
-                        string fileName = Path.GetFileName(row["path"].ToString() ?? "");
 
-                        // Create destination path with year/month structure in the same storage location
-                        // Example: C:\Storage\abc.pdf -> C:\Storage\2025\11\abc.pdf
-                        string year = uploadDate.Year.ToString();
-                        string month = uploadDate.Month.ToString("00");
-                        string destinationFolder = Path.Combine(sourceLocation, year, month);
-                        string destinationPath = Path.Combine(destinationFolder, fileName);
+                        // Call stored procedure to get new path
+                        string newRelativePath = "";
+                        updateConn = new SqlConnection(connectionString);
+                        updateConn.Open();
+
+                        using (SqlCommand cmd = new SqlCommand("[dbo].[GetNewDocumentPathByFolderHierarchy]", updateConn))
+                        {
+                            cmd.CommandType = CommandType.StoredProcedure;
+                            cmd.Parameters.AddWithValue("@Library_ID", selectedLibrary);
+                            cmd.Parameters.AddWithValue("@ImportProfileId", selectedImportProfile);
+                            cmd.Parameters.AddWithValue("@document_id", documentId);
+
+                            using (SqlDataReader reader = cmd.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    newRelativePath = reader["NewFullPath"].ToString();
+                                }
+                            }
+                        }
+
+                        if (string.IsNullOrWhiteSpace(newRelativePath))
+                        {
+                            errorCount++;
+                            LogError($"Failed to get new path for document ID {documentId}");
+                            totalProcessed++;
+                            this.Invoke((MethodInvoker)delegate
+                            {
+                                lblStatus.Text = $"Processed: {totalProcessed} | Success: {successCount} | Errors: {errorCount}";
+                            });
+                            continue;
+                        }
+
+                        // Build full destination path
+                        string destinationPath = Path.Combine(sourceLocation, newRelativePath);
+                        string destinationFolder = Path.GetDirectoryName(destinationPath);
 
                         // Create directory if it doesn't exist
                         if (!Directory.Exists(destinationFolder))
@@ -311,13 +341,22 @@ namespace DocumentMoveApp
                         if (File.Exists(sourcePath))
                         {
                             File.Copy(sourcePath, destinationPath, true);
+
+                            // Update document table with new path
+                            using (SqlCommand updateCmd = new SqlCommand("UPDATE dbo.document SET [Path] = @NewPath WHERE ID = @DocumentId", updateConn))
+                            {
+                                updateCmd.Parameters.AddWithValue("@NewPath", newRelativePath);
+                                updateCmd.Parameters.AddWithValue("@DocumentId", documentId);
+                                updateCmd.ExecuteNonQuery();
+                            }
+
                             successCount++;
-                            LogInfo($"Copied: {sourcePath} -> {destinationPath}");
+                            LogInfo($"Copied and updated: {sourcePath} -> {destinationPath} | Document ID: {documentId}");
                         }
                         else
                         {
                             errorCount++;
-                            LogError($"Source file not found: {sourcePath}");
+                            LogError($"Source file not found: {sourcePath} | Document ID: {documentId}");
                         }
 
                         totalProcessed++;
@@ -332,6 +371,13 @@ namespace DocumentMoveApp
                     {
                         errorCount++;
                         LogError($"Error processing document ID {row["id"]}: {ex.Message}");
+                    }
+                    finally
+                    {
+                        if (updateConn != null && updateConn.State == ConnectionState.Open)
+                        {
+                            updateConn.Close();
+                        }
                     }
                 }
 
