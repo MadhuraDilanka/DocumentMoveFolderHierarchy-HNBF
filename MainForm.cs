@@ -184,6 +184,181 @@ namespace DocumentMoveApp
             }
         }
 
+        private void EnsureStoredProcedureExists(string connectionString)
+        {
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(connectionString))
+                {
+                    conn.Open();
+
+                    // Check if stored procedure exists
+                    string checkQuery = @"
+                        SELECT COUNT(*) 
+                        FROM sys.objects 
+                        WHERE object_id = OBJECT_ID(N'[dbo].[GetNewDocumentPathByFolderHierarchy]') 
+                        AND type IN (N'P', N'PC')";
+
+                    bool spExists = false;
+                    using (SqlCommand checkCmd = new SqlCommand(checkQuery, conn))
+                    {
+                        spExists = (int)checkCmd.ExecuteScalar() > 0;
+                    }
+
+                    if (!spExists)
+                    {
+                        LogInfo("Creating stored procedure [GetNewDocumentPathByFolderHierarchy]...");
+
+                        string createSpQuery = @"
+CREATE PROCEDURE [dbo].[GetNewDocumentPathByFolderHierarchy]
+    @Library_ID BIGINT,
+    @ImportProfileId INT,
+    @document_id BIGINT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @folder_path NVARCHAR(MAX) = '';
+    DECLARE @file_name NVARCHAR(MAX);
+    DECLARE @file_extention NVARCHAR(MAX);
+    DECLARE @full_file_path NVARCHAR(MAX);
+    DECLARE @thumbnail_path NVARCHAR(MAX);
+    DECLARE @source_Type NVARCHAR(50);
+    DECLARE @is_folderHierarchy BIT;
+    DECLARE @is_date BIT;
+    DECLARE @is_combined BIT;
+    DECLARE @is_original_name BIT;
+    DECLARE @FileNameDateFormat NVARCHAR(MAX);
+    DECLARE @IndexDataTable NVARCHAR(255);
+    DECLARE @Branch NVARCHAR(255);
+    DECLARE @originalFileName NVARCHAR(255);
+    DECLARE @sourse_id INT;
+
+    SELECT @IndexDataTable = [IndexDataTable]
+    FROM [dbo].[Portal]
+    WHERE [ID] = @Library_ID;
+
+    SELECT @sourse_id = [Source]
+    FROM [dbo].[ImportProfile]
+    WHERE [ID] = @ImportProfileId;
+
+    DECLARE @sql NVARCHAR(MAX) = N'SELECT @BranchOut = [Branch] FROM ' 
+                                 + QUOTENAME(@IndexDataTable) 
+                                 + N' WHERE DocumentID = @DocID';
+    EXEC sp_executesql @sql, 
+         N'@DocID BIGINT, @BranchOut NVARCHAR(255) OUTPUT',
+         @DocID = @document_id, 
+         @BranchOut = @Branch OUTPUT;
+
+    IF @Branch IS NOT NULL
+    BEGIN
+        SET @Branch = LTRIM(RTRIM(@Branch));
+        WHILE CHARINDEX('  ', @Branch) > 0
+            SET @Branch = REPLACE(@Branch, '  ', ' ');
+    END
+
+    SELECT 
+        @file_name = [Path],
+        @file_extention = RIGHT([Path], CHARINDEX('.', REVERSE([Path])) - 1),
+        @source_Type = CS.SourceType
+    FROM [dbo].[Document] D
+    INNER JOIN [dbo].[ImportProfile] IP ON D.ImportProfileID = IP.ID
+    INNER JOIN [dbo].[ContentSource] CS ON IP.Source = CS.ID
+    WHERE D.ID = @document_id AND D.Library_ID = @Library_ID;
+
+    SET @originalFileName = REVERSE(SUBSTRING(REVERSE(@file_name), 
+                                              CHARINDEX('\', REVERSE(@file_name)) + 1, 
+                                              LEN(@file_name)));
+    SET @originalFileName = LEFT(@originalFileName, 
+                                 LEN(@originalFileName) - CHARINDEX('.', REVERSE(@originalFileName)));
+
+    SELECT 
+        @is_folderHierarchy = [IsFolderHierarchy],
+        @is_date = [IsDate],
+        @is_combined = [IsCombined],
+        @is_original_name = [IsOriginalName]
+    FROM [dbo].[DocumentNaming]
+    WHERE [SourceID] = @sourse_id AND [Library_ID] = @Library_ID;
+
+    IF EXISTS (SELECT * FROM [dbo].[Folder] WHERE [ImportProfileID] = @sourse_id AND [Library_ID] = @Library_ID)
+    BEGIN
+        ;WITH cte AS
+        (
+            SELECT 
+                [OrderId],
+                [CombineSequence],
+                [OptionName],
+                LTRIM(RTRIM([OptionValue])) AS [OptionValue]
+            FROM ConvertFolderTable(@sourse_id, @Library_ID)
+        ),
+        cte2 AS
+        (
+            SELECT
+                T1.orderID,
+                STUFF(
+                    ISNULL((
+                        SELECT '\' + LTRIM(RTRIM(T2.[OptionValue]))
+                        FROM cte AS T2
+                        WHERE T2.orderID = T1.orderID
+                        GROUP BY T2.[OptionValue], T2.[CombineSequence]
+                        ORDER BY T2.[CombineSequence]
+                        FOR XML PATH(''), TYPE
+                    ).value('.', 'NVARCHAR(MAX)'), ''),
+                1, 1, '') AS F_PATH
+            FROM cte AS T1
+            GROUP BY T1.[OrderId]
+        )
+        SELECT @folder_path = COALESCE(@folder_path + '\', '') + LTRIM(RTRIM(F_PATH))
+        FROM cte2;
+    END
+
+    IF @Branch IS NOT NULL AND @folder_path LIKE '%Branch%'
+        SET @folder_path = REPLACE(@folder_path, 'Branch', @Branch);
+
+    SET @file_extention = CASE 
+                            WHEN LEFT(@file_extention, 1) = '.' THEN @file_extention 
+                            ELSE '.' + @file_extention 
+                          END;
+
+    SET @thumbnail_path = ISNULL(@folder_path + '\', '') + @originalFileName;
+    SET @full_file_path = ISNULL(@folder_path + '\', '') + @originalFileName + @file_extention;
+
+    IF @source_Type = 'HTTP'
+    BEGIN
+        SET @thumbnail_path = 'CONTENT\' + @thumbnail_path;
+        SET @full_file_path = 'CONTENT\' + @full_file_path;
+    END
+
+    SELECT 
+        @document_id AS DocumentID,
+        @Branch AS CleanBranchValue,
+        @folder_path AS FolderHierarchyPath,
+        @originalFileName AS FileName,
+        @full_file_path AS NewFullPath,
+        @thumbnail_path AS NewThumbnailPath;
+END";
+
+                        using (SqlCommand createCmd = new SqlCommand(createSpQuery, conn))
+                        {
+                            createCmd.CommandTimeout = 120;
+                            createCmd.ExecuteNonQuery();
+                        }
+
+                        LogInfo("Stored procedure created successfully.");
+                    }
+                    else
+                    {
+                        LogInfo("Stored procedure already exists.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError($"Error ensuring stored procedure exists: {ex.Message}");
+                throw new Exception($"Failed to create required stored procedure: {ex.Message}", ex);
+            }
+        }
+
         private async void btnProcess_Click(object sender, EventArgs e)
         {
             if (string.IsNullOrWhiteSpace(txtConnectionString.Text))
@@ -215,10 +390,14 @@ namespace DocumentMoveApp
             // Disable controls during processing
             SetControlsEnabled(false);
             progressBar.Value = 0;
-            lblStatus.Text = "Processing...";
+            lblStatus.Text = "Checking stored procedure...";
 
             try
             {
+                // Ensure stored procedure exists
+                EnsureStoredProcedureExists(connectionString);
+                lblStatus.Text = "Processing...";
+
                 await System.Threading.Tasks.Task.Run(() => ProcessDocuments(selectedLibrary, selectedImportProfile, connectionString));
                 MessageBox.Show("Processing completed successfully!", "Success", 
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
