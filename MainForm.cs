@@ -207,6 +207,11 @@ namespace DocumentMoveApp
                 return;
             }
 
+            // Get values from UI controls before starting background thread
+            string selectedLibrary = cmbLibrary.SelectedValue?.ToString() ?? "";
+            string selectedImportProfile = cmbImportProfile.SelectedValue?.ToString() ?? "";
+            string connectionString = txtConnectionString.Text;
+
             // Disable controls during processing
             SetControlsEnabled(false);
             progressBar.Value = 0;
@@ -214,7 +219,7 @@ namespace DocumentMoveApp
 
             try
             {
-                await System.Threading.Tasks.Task.Run(() => ProcessDocuments());
+                await System.Threading.Tasks.Task.Run(() => ProcessDocuments(selectedLibrary, selectedImportProfile, connectionString));
                 MessageBox.Show("Processing completed successfully!", "Success", 
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 lblStatus.Text = "Processing completed";
@@ -232,9 +237,8 @@ namespace DocumentMoveApp
             }
         }
 
-        private void ProcessDocuments()
+        private void ProcessDocuments(string selectedLibrary, string selectedImportProfile, string connectionString)
         {
-            string selectedLibrary = cmbLibrary.SelectedValue?.ToString() ?? "";
             int chunkSize = 5000;
             int offset = 0;
             int totalProcessed = 0;
@@ -261,16 +265,13 @@ namespace DocumentMoveApp
                             INNER JOIN dbo.importprofile IMP ON DC.importprofileid = IMP.id
                             INNER JOIN contentsource CS ON IMP.[source] = CS.id
                         WHERE 
-                            DC.IsEncrypted = 1 
-                            AND (DC.IsDecrypt = 0 OR DC.IsDecrypt IS NULL) 
-                            AND (DC.DecryptStatus = 0 OR DC.DecryptStatus IS NULL)
-                            AND DC.Library_ID = {selectedLibrary}
+                            DC.Library_ID = {selectedLibrary}
                     ) tbl
                     WHERE RawNum > {offset} AND RawNum <= {offset + chunkSize}
                     ORDER BY RawNum";
 
                 DataTable dt = new DataTable();
-                using (SqlConnection conn = new SqlConnection(txtConnectionString.Text))
+                using (SqlConnection conn = new SqlConnection(connectionString))
                 {
                     conn.Open();
                     using (SqlDataAdapter adapter = new SqlDataAdapter(query, conn))
