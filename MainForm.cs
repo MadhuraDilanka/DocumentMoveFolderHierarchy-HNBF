@@ -506,6 +506,9 @@ END";
                             continue;
                         }
 
+                        // Remove leading backslashes from relative path
+                        newRelativePath = newRelativePath.TrimStart('\\');
+
                         // Build full destination path
                         string destinationPath = Path.Combine(sourceLocation, newRelativePath);
                         string destinationFolder = Path.GetDirectoryName(destinationPath);
