@@ -443,6 +443,41 @@ END";
             int totalProcessed = 0;
             int successCount = 0;
             int errorCount = 0;
+            int totalDocuments = 0;
+
+            // Get total count of documents to process
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string countQuery = $@"
+                        SELECT COUNT(*) 
+                        FROM dbo.document DC
+                        INNER JOIN dbo.DocumentInformation AS DI ON DC.ID = DI.DocumentID
+                        INNER JOIN dbo.importprofile IMP ON DC.importprofileid = IMP.id
+                        INNER JOIN contentsource CS ON IMP.[source] = CS.id
+                        WHERE DC.Library_ID = {selectedLibrary}";
+                    
+                    using (SqlCommand countCmd = new SqlCommand(countQuery, conn))
+                    {
+                        totalDocuments = (int)countCmd.ExecuteScalar();
+                    }
+                }
+
+                // Initialize progress bar
+                this.Invoke((MethodInvoker)delegate
+                {
+                    progressBar.Minimum = 0;
+                    progressBar.Maximum = totalDocuments;
+                    progressBar.Value = 0;
+                    lblStatus.Text = $"Total documents to process: {totalDocuments}";
+                });
+            }
+            catch (Exception ex)
+            {
+                LogError($"Error getting total document count: {ex.Message}");
+            }
 
             while (true)
             {
@@ -521,7 +556,9 @@ END";
                             totalProcessed++;
                             this.Invoke((MethodInvoker)delegate
                             {
-                                lblStatus.Text = $"Processed: {totalProcessed} | Success: {successCount} | Errors: {errorCount}";
+                                progressBar.Value = totalProcessed;
+                                int percentage = totalDocuments > 0 ? (totalProcessed * 100) / totalDocuments : 0;
+                                lblStatus.Text = $"Progress: {percentage}% ({totalProcessed}/{totalDocuments}) | Success: {successCount} | Errors: {errorCount}";
                             });
                             continue;
                         }
@@ -575,7 +612,9 @@ END";
                         // Update progress on UI thread
                         this.Invoke((MethodInvoker)delegate
                         {
-                            lblStatus.Text = $"Processed: {totalProcessed} | Success: {successCount} | Errors: {errorCount}";
+                            progressBar.Value = totalProcessed;
+                            int percentage = totalDocuments > 0 ? (totalProcessed * 100) / totalDocuments : 0;
+                            lblStatus.Text = $"Progress: {percentage}% ({totalProcessed}/{totalDocuments}) | Success: {successCount} | Errors: {errorCount}";
                         });
                     }
                     catch (Exception ex)
@@ -598,6 +637,7 @@ END";
             // Final status update
             this.Invoke((MethodInvoker)delegate
             {
+                progressBar.Value = progressBar.Maximum;
                 lblStatus.Text = $"Completed! Total: {totalProcessed} | Success: {successCount} | Errors: {errorCount}";
             });
         }
