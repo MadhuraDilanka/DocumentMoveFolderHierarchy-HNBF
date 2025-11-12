@@ -209,8 +209,9 @@ namespace DocumentMoveApp
                     {
                         LogInfo("Creating stored procedure [GetNewDocumentPathByFolderHierarchy]...");
 
-                        string createSpQuery = @"
-CREATE PROCEDURE [dbo].[GetNewDocumentPathByFolderHierarchy]
+                        // Use string concatenation to avoid complex escaping issues
+                        string createSpQuery = 
+@"CREATE PROCEDURE [dbo].[GetNewDocumentPathByFolderHierarchy]
     @Library_ID BIGINT,
     @ImportProfileId INT,
     @document_id BIGINT
@@ -218,21 +219,21 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    DECLARE @folder_path NVARCHAR(MAX) = '';
-    DECLARE @file_name NVARCHAR(MAX);
-    DECLARE @file_extention NVARCHAR(MAX);
-    DECLARE @full_file_path NVARCHAR(MAX);
-    DECLARE @thumbnail_path NVARCHAR(MAX);
-    DECLARE @source_Type NVARCHAR(50);
-    DECLARE @is_folderHierarchy BIT;
-    DECLARE @is_date BIT;
-    DECLARE @is_combined BIT;
-    DECLARE @is_original_name BIT;
-    DECLARE @FileNameDateFormat NVARCHAR(MAX);
-    DECLARE @IndexDataTable NVARCHAR(255);
-    DECLARE @Branch NVARCHAR(255);
-    DECLARE @originalFileName NVARCHAR(255);
-    DECLARE @sourse_id INT;
+    DECLARE 
+        @folder_path NVARCHAR(MAX) = N'',
+        @file_name NVARCHAR(MAX),
+        @file_extention NVARCHAR(MAX),
+        @full_file_path NVARCHAR(MAX),
+        @thumbnail_path NVARCHAR(MAX),
+        @source_Type NVARCHAR(50),
+        @is_folderHierarchy BIT,
+        @is_date BIT,
+        @is_combined BIT,
+        @is_original_name BIT,
+        @IndexDataTable NVARCHAR(255),
+        @originalFileName NVARCHAR(255),
+        @sql NVARCHAR(MAX),
+        @sourse_id INT;
 
     SELECT @IndexDataTable = [IndexDataTable]
     FROM [dbo].[Portal]
@@ -241,21 +242,6 @@ BEGIN
     SELECT @sourse_id = [Source]
     FROM [dbo].[ImportProfile]
     WHERE [ID] = @ImportProfileId;
-
-    DECLARE @sql NVARCHAR(MAX) = N'SELECT @BranchOut = [Branch] FROM ' 
-                                 + QUOTENAME(@IndexDataTable) 
-                                 + N' WHERE DocumentID = @DocID';
-    EXEC sp_executesql @sql, 
-         N'@DocID BIGINT, @BranchOut NVARCHAR(255) OUTPUT',
-         @DocID = @document_id, 
-         @BranchOut = @Branch OUTPUT;
-
-    IF @Branch IS NOT NULL
-    BEGIN
-        SET @Branch = LTRIM(RTRIM(@Branch));
-        WHILE CHARINDEX('  ', @Branch) > 0
-            SET @Branch = REPLACE(@Branch, '  ', ' ');
-    END
 
     SELECT 
         @file_name = [Path],
@@ -266,10 +252,10 @@ BEGIN
     INNER JOIN [dbo].[ContentSource] CS ON IP.Source = CS.ID
     WHERE D.ID = @document_id AND D.Library_ID = @Library_ID;
 
-    SET @originalFileName = REVERSE(SUBSTRING(REVERSE(@file_name), 
-                                              CHARINDEX('\', REVERSE(@file_name)) + 1, 
+    SET @originalFileName = REVERSE(SUBSTRING(REVERSE(@file_name),
+                                              CHARINDEX(" + "'\\" + @"', REVERSE(@file_name)) + 1,
                                               LEN(@file_name)));
-    SET @originalFileName = LEFT(@originalFileName, 
+    SET @originalFileName = LEFT(@originalFileName,
                                  LEN(@originalFileName) - CHARINDEX('.', REVERSE(@originalFileName)));
 
     SELECT 
@@ -287,8 +273,8 @@ BEGIN
             SELECT 
                 [OrderId],
                 [CombineSequence],
-                [OptionName],
-                LTRIM(RTRIM([OptionValue])) AS [OptionValue]
+                LTRIM(RTRIM([OptionValue])) AS [OptionValue],
+                [OptionName]
             FROM ConvertFolderTable(@sourse_id, @Library_ID)
         ),
         cte2 AS
@@ -297,7 +283,7 @@ BEGIN
                 T1.orderID,
                 STUFF(
                     ISNULL((
-                        SELECT '\' + LTRIM(RTRIM(T2.[OptionValue]))
+                        SELECT " + "'\\" + @"' + LTRIM(RTRIM(T2.[OptionValue]))
                         FROM cte AS T2
                         WHERE T2.orderID = T1.orderID
                         GROUP BY T2.[OptionValue], T2.[CombineSequence]
@@ -308,30 +294,64 @@ BEGIN
             FROM cte AS T1
             GROUP BY T1.[OrderId]
         )
-        SELECT @folder_path = COALESCE(@folder_path + '\', '') + LTRIM(RTRIM(F_PATH))
+        SELECT @folder_path = COALESCE(@folder_path + " + "'\\" + @"', '') + LTRIM(RTRIM(F_PATH))
         FROM cte2;
     END
 
-    IF @Branch IS NOT NULL AND @folder_path LIKE '%Branch%'
-        SET @folder_path = REPLACE(@folder_path, 'Branch', @Branch);
+    DECLARE @IndexName NVARCHAR(255), @Value NVARCHAR(MAX);
+
+    DECLARE cur CURSOR FOR
+    SELECT DISTINCT LTRIM(RTRIM([OptionValue]))
+    FROM ConvertFolderTable(@sourse_id, @Library_ID)
+    WHERE [OptionName] = 'DB' AND NULLIF([OptionValue],'') IS NOT NULL;
+
+    OPEN cur
+    FETCH NEXT FROM cur INTO @IndexName;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @sql = N'SELECT @outVal = LTRIM(RTRIM(CAST([' + @IndexName + '] AS NVARCHAR(MAX)))) 
+                     FROM ' + QUOTENAME(@IndexDataTable) + 
+                     N' WHERE DocumentID = @docID';
+        EXEC sp_executesql @sql, 
+             N'@docID BIGINT, @outVal NVARCHAR(MAX) OUTPUT',
+             @docID = @document_id, 
+             @outVal = @Value OUTPUT;
+
+        IF @Value IS NOT NULL
+        BEGIN
+            SET @Value = LTRIM(RTRIM(@Value));
+            WHILE CHARINDEX('  ', @Value) > 0
+                SET @Value = REPLACE(@Value, '  ', ' ');
+
+            SET @folder_path = REPLACE(@folder_path, @IndexName, @Value);
+        END
+
+        FETCH NEXT FROM cur INTO @IndexName;
+    END
+
+    CLOSE cur;
+    DEALLOCATE cur;
+
+    SET @folder_path = REPLACE(@folder_path, '  ', ' ');
+    SET @folder_path = LTRIM(RTRIM(@folder_path));
 
     SET @file_extention = CASE 
                             WHEN LEFT(@file_extention, 1) = '.' THEN @file_extention 
                             ELSE '.' + @file_extention 
                           END;
 
-    SET @thumbnail_path = ISNULL(@folder_path + '\', '') + @originalFileName;
-    SET @full_file_path = ISNULL(@folder_path + '\', '') + @originalFileName + @file_extention;
+    SET @thumbnail_path = ISNULL(@folder_path + " + "'\\" + @"', '') + @originalFileName;
+    SET @full_file_path = ISNULL(@folder_path + " + "'\\" + @"', '') + @originalFileName + @file_extention;
 
     IF @source_Type = 'HTTP'
     BEGIN
-        SET @thumbnail_path = 'CONTENT\' + @thumbnail_path;
-        SET @full_file_path = 'CONTENT\' + @full_file_path;
+        SET @thumbnail_path = 'CONTENT" + "\\" + @"' + @thumbnail_path;
+        SET @full_file_path = 'CONTENT" + "\\" + @"' + @full_file_path;
     END
 
     SELECT 
         @document_id AS DocumentID,
-        @Branch AS CleanBranchValue,
         @folder_path AS FolderHierarchyPath,
         @originalFileName AS FileName,
         @full_file_path AS NewFullPath,
@@ -524,16 +544,25 @@ END";
                         {
                             File.Copy(sourcePath, destinationPath, true);
 
-                            // Update document table with new path
-                            using (SqlCommand updateCmd = new SqlCommand("UPDATE dbo.document SET [Path] = @NewPath WHERE ID = @DocumentId", updateConn))
+                            // Get thumbnail path (path without extension)
+                            string thumbnailPath = newRelativePath;
+                            int lastDotIndex = thumbnailPath.LastIndexOf('.');
+                            if (lastDotIndex > 0)
+                            {
+                                thumbnailPath = thumbnailPath.Substring(0, lastDotIndex);
+                            }
+
+                            // Update document table with new path and thumbnail path
+                            using (SqlCommand updateCmd = new SqlCommand("UPDATE dbo.document SET [Path] = @NewPath, [ThumbnailPath] = @ThumbnailPath WHERE ID = @DocumentId", updateConn))
                             {
                                 updateCmd.Parameters.AddWithValue("@NewPath", newRelativePath);
+                                updateCmd.Parameters.AddWithValue("@ThumbnailPath", thumbnailPath);
                                 updateCmd.Parameters.AddWithValue("@DocumentId", documentId);
                                 updateCmd.ExecuteNonQuery();
                             }
 
                             successCount++;
-                            LogInfo($"Copied and updated: {sourcePath} -> {destinationPath} | Document ID: {documentId}");
+                            LogInfo($"Copied and updated: {sourcePath} -> {destinationPath} | Path: {newRelativePath} | Thumbnail: {thumbnailPath} | Document ID: {documentId}");
                         }
                         else
                         {
