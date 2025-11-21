@@ -226,132 +226,106 @@ BEGIN
         @full_file_path NVARCHAR(MAX),
         @thumbnail_path NVARCHAR(MAX),
         @source_Type NVARCHAR(50),
-        @is_folderHierarchy BIT,
-        @is_date BIT,
-        @is_combined BIT,
-        @is_original_name BIT,
         @IndexDataTable NVARCHAR(255),
         @originalFileName NVARCHAR(255),
         @sql NVARCHAR(MAX),
-        @sourse_id INT;
+        @sourse_id INT,
+        @documentDate DATETIME,
+        @year NVARCHAR(10),
+        @month NVARCHAR(10),
+        @currentYear NVARCHAR(10),
+        @currentMonth NVARCHAR(10);
 
-    SELECT @IndexDataTable = [IndexDataTable]
-    FROM [dbo].[Portal]
-    WHERE [ID] = @Library_ID;
+    SELECT @IndexDataTable = IndexDataTable
+    FROM Portal
+    WHERE ID = @Library_ID;
 
     SELECT @sourse_id = [Source]
-    FROM [dbo].[ImportProfile]
-    WHERE [ID] = @ImportProfileId;
+    FROM ImportProfile
+    WHERE ID = @ImportProfileId;
+
+    SELECT TOP 1 @documentDate = DateTime
+    FROM DocumentInformation
+    WHERE DocumentID = @document_id;
+
+    IF @documentDate IS NULL
+    BEGIN
+        RAISERROR ('DocumentInformation date not found for this DocumentID', 16, 1);
+        RETURN;
+    END
+
+    SET @year  = CONVERT(NVARCHAR(4), YEAR(@documentDate));
+    SET @month = CONVERT(NVARCHAR(10), MONTH(@documentDate));
 
     SELECT 
         @file_name = [Path],
         @file_extention = RIGHT([Path], CHARINDEX('.', REVERSE([Path])) - 1),
         @source_Type = CS.SourceType
-    FROM [dbo].[Document] D
-    INNER JOIN [dbo].[ImportProfile] IP ON D.ImportProfileID = IP.ID
-    INNER JOIN [dbo].[ContentSource] CS ON IP.Source = CS.ID
-    WHERE D.ID = @document_id AND D.Library_ID = @Library_ID;
+    FROM Document D
+    INNER JOIN ImportProfile IP ON D.ImportProfileID = IP.ID
+    INNER JOIN ContentSource CS ON IP.Source = CS.ID
+    WHERE D.ID = @document_id;
 
-    SET @originalFileName = REVERSE(SUBSTRING(REVERSE(@file_name),
-                                              CHARINDEX(" + "'\\" + @"', REVERSE(@file_name)) + 1,
-                                              LEN(@file_name)));
-    SET @originalFileName = LEFT(@originalFileName,
-                                 LEN(@originalFileName) - CHARINDEX('.', REVERSE(@originalFileName)));
+    SET @originalFileName = PARSENAME(REPLACE(@file_name," + "'\\" + @"','.'), 2);
 
-    SELECT 
-        @is_folderHierarchy = [IsFolderHierarchy],
-        @is_date = [IsDate],
-        @is_combined = [IsCombined],
-        @is_original_name = [IsOriginalName]
-    FROM [dbo].[DocumentNaming]
-    WHERE [SourceID] = @sourse_id AND [Library_ID] = @Library_ID;
-
-    IF EXISTS (SELECT * FROM [dbo].[Folder] WHERE [ImportProfileID] = @sourse_id AND [Library_ID] = @Library_ID)
+    IF EXISTS (SELECT 1 FROM Folder WHERE ImportProfileID = @sourse_id AND Library_ID = @Library_ID)
     BEGIN
         ;WITH cte AS
         (
             SELECT 
-                [OrderId],
-                [CombineSequence],
-                LTRIM(RTRIM([OptionValue])) AS [OptionValue],
-                [OptionName]
+                OrderId,
+                CombineSequence,
+                LTRIM(RTRIM(OptionValue)) AS OptionValue,
+                OptionName
             FROM ConvertFolderTable(@sourse_id, @Library_ID)
         ),
         cte2 AS
         (
             SELECT
-                T1.orderID,
+                T1.OrderID,
                 STUFF(
                     ISNULL((
-                        SELECT " + "'\\" + @"' + LTRIM(RTRIM(T2.[OptionValue]))
-                        FROM cte AS T2
-                        WHERE T2.orderID = T1.orderID
-                        GROUP BY T2.[OptionValue], T2.[CombineSequence]
-                        ORDER BY T2.[CombineSequence]
+                        SELECT " + "'\\" + @"' + LTRIM(RTRIM(T2.OptionValue))
+                        FROM cte T2
+                        WHERE T2.OrderId = T1.OrderId
+                        GROUP BY T2.OptionValue, T2.CombineSequence
+                        ORDER BY T2.CombineSequence
                         FOR XML PATH(''), TYPE
                     ).value('.', 'NVARCHAR(MAX)'), ''),
-                1, 1, '') AS F_PATH
-            FROM cte AS T1
-            GROUP BY T1.[OrderId]
+                    1, 1, ''
+                ) AS F_PATH
+            FROM cte T1
+            GROUP BY T1.OrderID
         )
         SELECT @folder_path = COALESCE(@folder_path + " + "'\\" + @"', '') + LTRIM(RTRIM(F_PATH))
         FROM cte2;
     END
 
-    DECLARE @IndexName NVARCHAR(255), @Value NVARCHAR(MAX);
+    SET @currentYear  = CONVERT(NVARCHAR(4), YEAR(GETDATE()));
+    SET @currentMonth = RIGHT('0' + CONVERT(NVARCHAR(2), MONTH(GETDATE())), 2);
 
-    DECLARE cur CURSOR FOR
-    SELECT DISTINCT LTRIM(RTRIM([OptionValue]))
-    FROM ConvertFolderTable(@sourse_id, @Library_ID)
-    WHERE [OptionName] = 'DB' AND NULLIF([OptionValue],'') IS NOT NULL;
+    SET @folder_path = REPLACE(@folder_path, " + "'\\" + @"' + @currentYear, '');
+    SET @folder_path = REPLACE(@folder_path, " + "'\\" + @"' + @currentMonth, '');
 
-    OPEN cur
-    FETCH NEXT FROM cur INTO @IndexName;
+    WHILE CHARINDEX(" + "'\\\\'" + @", @folder_path) > 0
+        SET @folder_path = REPLACE(@folder_path, " + "'\\\\'" + @", " + "'\\" + @"');
 
-    WHILE @@FETCH_STATUS = 0
-    BEGIN
-        SET @sql = N'SELECT @outVal = LTRIM(RTRIM(CAST([' + @IndexName + '] AS NVARCHAR(MAX)))) 
-                     FROM ' + QUOTENAME(@IndexDataTable) + 
-                     N' WHERE DocumentID = @docID';
-        EXEC sp_executesql @sql, 
-             N'@docID BIGINT, @outVal NVARCHAR(MAX) OUTPUT',
-             @docID = @document_id, 
-             @outVal = @Value OUTPUT;
-
-        IF @Value IS NOT NULL
-        BEGIN
-            SET @Value = LTRIM(RTRIM(@Value));
-            WHILE CHARINDEX('  ', @Value) > 0
-                SET @Value = REPLACE(@Value, '  ', ' ');
-
-            SET @folder_path = REPLACE(@folder_path, @IndexName, @Value);
-        END
-
-        FETCH NEXT FROM cur INTO @IndexName;
-    END
-
-    CLOSE cur;
-    DEALLOCATE cur;
-
-    SET @folder_path = REPLACE(@folder_path, '  ', ' ');
     SET @folder_path = LTRIM(RTRIM(@folder_path));
 
-    SET @file_extention = CASE 
-                            WHEN LEFT(@file_extention, 1) = '.' THEN @file_extention 
-                            ELSE '.' + @file_extention 
-                          END;
+    IF RIGHT(@folder_path, 1) <> " + "'\\" + @"'
+        SET @folder_path = @folder_path + " + "'\\" + @"';
 
-    SET @thumbnail_path = ISNULL(@folder_path + " + "'\\" + @"', '') + @originalFileName;
-    SET @full_file_path = ISNULL(@folder_path + " + "'\\" + @"', '') + @originalFileName + @file_extention;
+    SET @folder_path = @folder_path + @year + " + "'\\" + @"' + @month;
 
-    IF @source_Type = 'HTTP'
-    BEGIN
-        SET @thumbnail_path = 'CONTENT" + "\\" + @"' + @thumbnail_path;
-        SET @full_file_path = 'CONTENT" + "\\" + @"' + @full_file_path;
-    END
+    IF LEFT(@file_extention,1) <> '.'
+        SET @file_extention = '.' + @file_extention;
+
+    SET @full_file_path = @folder_path + " + "'\\" + @"' + @originalFileName + @file_extention;
+    SET @thumbnail_path = @folder_path + " + "'\\" + @"' + @originalFileName;
 
     SELECT 
         @document_id AS DocumentID,
+        @documentDate AS DocumentDate,
         @folder_path AS FolderHierarchyPath,
         @originalFileName AS FileName,
         @full_file_path AS NewFullPath,
